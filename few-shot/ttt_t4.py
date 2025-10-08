@@ -30,7 +30,6 @@ from arclib.representers import (
 from arclib.messagers import GPTTextMessageRepresenterV2
 from arclib.update_model import TTT
 from arclib.augmenters import *
-from inference.preprocess import get_preprocessed_tasks_single
 
 
 def download_arc_data(data_dir: str = "data"):
@@ -110,6 +109,80 @@ def get_augmenters(
     )
 
 
+def get_test_time_train_data(
+    task, augmenters, n: int = 1, permute_n: int = 1, seed: int = 0
+):
+    """Generate test-time training data with augmentation and permutations."""
+    from arclib.augmenters import IdentityAugmenter
+    import numpy as np
+    
+    rng = np.random.RandomState(seed)
+    train_data = []
+    augmenters_with_identity = [IdentityAugmenter()] + augmenters
+    
+    for augmenter in augmenters_with_identity:
+        augmented_task = augmenter.apply_to_task(task)
+        
+        # Leave out n training examples for validation
+        if len(augmented_task.train_examples) > n:
+            examples_to_use = augmented_task.train_examples[:-n]
+            
+            # Apply permutations
+            for _ in range(permute_n):
+                permuted_indices = rng.permutation(len(examples_to_use))
+                permuted_examples = [examples_to_use[i] for i in permuted_indices]
+                
+                permuted_task = type(augmented_task)(
+                    train_examples=permuted_examples,
+                    test_example=augmented_task.test_example,
+                    name=augmented_task.name
+                )
+                train_data.append(permuted_task)
+    
+    return train_data
+
+
+def format_and_filter(formatter, tokenizer, task, max_tokens: int = 8192):
+    """Format task for training and filter by token count."""
+    # Encode task using the message representer
+    formatted = formatter.encode(task)
+    data = {"input": formatted[0], "output": formatted[1]}
+    
+    # Apply chat template
+    task_text = tokenizer.apply_chat_template(
+        formatted[0] + [formatted[1]],
+        tokenize=False,
+        add_generation_prompt=True
+    )
+    
+    # Tokenize to get token count
+    tokens = tokenizer(task_text, return_tensors="pt")
+    total_tokens = tokens['input_ids'].shape[1]
+    
+    data["total_tokens"] = total_tokens
+    data["full_text"] = task_text
+    
+    return data if total_tokens < max_tokens else None
+
+
+def get_formatted_data(
+    task, augmenters, formatter, tokenizer, leave_n: int = 1,
+    permute_n: int = 1, seed: int = 0, max_tokens: int = 8192
+):
+    """Get formatted training data for a task."""
+    train_data = get_test_time_train_data(
+        task, augmenters, n=leave_n, permute_n=permute_n, seed=seed
+    )
+    
+    formatted_data = []
+    for task_item in train_data:
+        formatted = format_and_filter(formatter, tokenizer, task_item, max_tokens=max_tokens)
+        if formatted is not None:
+            formatted_data.append(formatted)
+    
+    return formatted_data
+
+
 def process_task(
     task,
     augmenters,
@@ -120,43 +193,25 @@ def process_task(
     Nmax: int = 250,
     seed: int = 0
 ):
-    """Process task to create training data."""
-    from arclib.arc import Task
-    from arclib.augmenters import IdentityAugmenter, PermuteExamples
+    """Process task to create training data (matches original ttt.py logic)."""
+    import numpy as np
+    rng = np.random.RandomState(seed)
     
-    train_data = []
+    train = []
+    # Generate training data for each n in leave_n
+    for n in leave_n:
+        leave_n_train_data = get_formatted_data(
+            task, augmenters, formatter, tokenizer,
+            leave_n=n, permute_n=permute_n, seed=seed
+        )
+        train.extend(leave_n_train_data)
     
-    for leave_out in leave_n:
-        for _ in range(permute_n):
-            # Get preprocessed tasks
-            tasks_list = get_preprocessed_tasks_single(
-                task=task,
-                augmenters=[IdentityAugmenter()] + augmenters,
-                task_processor=formatter.process,
-                leave_n=leave_out,
-                Nmax=Nmax,
-                seed=seed
-            )
-            
-            # Apply permutations
-            for augmented_task in tasks_list:
-                permuted_tasks = PermuteExamples().apply_to_task(augmented_task)
-                
-                for perm_task in permuted_tasks[:1]:  # Take first permutation
-                    # Format as text
-                    messages = formatter.process(perm_task)
-                    if messages:
-                        full_text = formatter.format_messages(messages)
-                        
-                        # Tokenize to check length
-                        tokens = tokenizer(full_text, return_tensors="pt")
-                        if tokens['input_ids'].shape[1] <= 8000:  # Max length check
-                            train_data.append({
-                                "full_text": full_text,
-                                "task_name": task.name
-                            })
+    # Shuffle and limit the total number of examples if needed
+    if len(train) > Nmax:
+        rng.shuffle(train)
+        train = train[:Nmax]
     
-    return train_data
+    return train
 
 
 def main():
