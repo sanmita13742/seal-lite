@@ -257,7 +257,7 @@ class TTT:
             logging_steps=1,
             save_strategy="no",
             report_to="none",
-            bf16=True,  # Use bfloat16 precision
+            fp16=True,  # Use float16 precision (T4 doesn't support bf16)
             remove_unused_columns=False,
             optim="adamw_torch",
             warmup_steps=11,
