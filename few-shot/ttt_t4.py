@@ -256,10 +256,10 @@ def main():
     except (FileNotFoundError, json.JSONDecodeError) as e:
         print(f"Single JSON file not found or invalid: {e}")
         print("Falling back to public ARC directory format...")
-        # Use public ARC format
+        # Use public ARC format - files are directly in training/ directory
         from arclib.arc import read_tasks_from_arc_directory
-        challenge_dir = os.path.join(data_dir, "training", "challenge")
-        solution_dir = os.path.join(data_dir, "training", "solution")
+        challenge_dir = os.path.join(data_dir, "training")
+        solution_dir = os.path.join(data_dir, "training")  # Same dir in public ARC
         tasks = read_tasks_from_arc_directory(challenge_dir, solution_dir, max_tasks=args.num_tasks)
         print(f"Loaded {len(tasks)} tasks from ARC directory.")
     
