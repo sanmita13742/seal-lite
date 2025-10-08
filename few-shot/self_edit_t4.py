@@ -252,14 +252,23 @@ def main():
     data_dir = os.path.dirname(args.challenge_file) or "data"
     download_arc_data(data_dir)
     
-    # Load tasks
+    # Load tasks with fallback
     print("\nLoading tasks...")
-    tasks = read_tasks_from_single_file(
-        challenge_file=args.challenge_file,
-        solution_file=args.solution_file
-    )
-    tasks = tasks[:args.n_tasks]
-    print(f"Loaded {len(tasks)} tasks")
+    try:
+        tasks = read_tasks_from_single_file(
+            challenge_file=args.challenge_file,
+            solution_file=args.solution_file
+        )
+        tasks = tasks[:args.n_tasks]
+        print(f"Loaded {len(tasks)} tasks from single JSON file.")
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Single JSON file not found or invalid: {e}")
+        print("Falling back to public ARC directory format...")
+        from arclib.arc import read_tasks_from_arc_directory
+        challenge_dir = os.path.join(data_dir, "training", "challenge")
+        solution_dir = os.path.join(data_dir, "training", "solution")
+        tasks = read_tasks_from_arc_directory(challenge_dir, solution_dir, max_tasks=args.n_tasks)
+        print(f"Loaded {len(tasks)} tasks from ARC directory.")
     
     # Setup tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
