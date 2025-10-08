@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Dict
 from tqdm import tqdm
 import numpy as np
+import urllib.request
 
 from transformers import AutoTokenizer
 from arclib.arc import read_tasks_from_single_file, to_list
@@ -30,6 +31,30 @@ from arclib.messagers import GPTTextMessageRepresenterV2
 from arclib.eval import evaluate
 from arclib.voting import vote
 from inference.engine_t4 import T4Engine
+
+
+def download_arc_data(data_dir: str = "data"):
+    """Download ARC dataset if not already present."""
+    os.makedirs(data_dir, exist_ok=True)
+    
+    files = {
+        "arc-agi_training_challenges.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/training/challenges.json",
+        "arc-agi_training_solutions.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/training/solutions.json",
+        "arc-agi_evaluation_challenges.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/evaluation/challenges.json",
+        "arc-agi_evaluation_solutions.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/evaluation/solutions.json",
+    }
+    
+    for filename, url in files.items():
+        filepath = os.path.join(data_dir, filename)
+        if not os.path.exists(filepath):
+            print(f"Downloading {filename}...")
+            try:
+                urllib.request.urlretrieve(url, filepath)
+                print(f"✓ Downloaded {filename}")
+            except Exception as e:
+                print(f"✗ Failed to download {filename}: {e}")
+        else:
+            print(f"✓ {filename} already exists")
 
 
 def extract_grid_from_response(response: str, height: int, width: int):
@@ -118,6 +143,11 @@ def main():
     
     # Create output directory
     os.makedirs(args.experiment_folder, exist_ok=True)
+    
+    # Download ARC data if needed
+    print("\nChecking ARC dataset...")
+    data_dir = os.path.dirname(args.data_file) or "data"
+    download_arc_data(data_dir)
     
     # Load tasks
     print("\nLoading tasks...")

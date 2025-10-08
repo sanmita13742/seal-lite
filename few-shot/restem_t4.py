@@ -16,6 +16,7 @@ import argparse
 import shutil
 from pathlib import Path
 from tqdm import tqdm
+import urllib.request
 
 from transformers import (
     AutoModelForCausalLM,
@@ -25,6 +26,30 @@ from transformers import (
 )
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import Dataset
+
+
+def download_arc_data(data_dir: str = "data"):
+    """Download ARC dataset if not already present."""
+    os.makedirs(data_dir, exist_ok=True)
+    
+    files = {
+        "arc-agi_training_challenges.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/training/challenges.json",
+        "arc-agi_training_solutions.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/training/solutions.json",
+        "arc-agi_evaluation_challenges.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/evaluation/challenges.json",
+        "arc-agi_evaluation_solutions.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/evaluation/solutions.json",
+    }
+    
+    for filename, url in files.items():
+        filepath = os.path.join(data_dir, filename)
+        if not os.path.exists(filepath):
+            print(f"Downloading {filename}...")
+            try:
+                urllib.request.urlretrieve(url, filepath)
+                print(f"✓ Downloaded {filename}")
+            except Exception as e:
+                print(f"✗ Failed to download {filename}: {e}")
+        else:
+            print(f"✓ {filename} already exists")
 
 
 def create_dataset(training_data, tokenizer):

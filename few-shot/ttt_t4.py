@@ -16,6 +16,7 @@ import argparse
 from pathlib import Path
 from typing import List, Optional
 from tqdm import tqdm
+import urllib.request
 
 from transformers import AutoTokenizer
 from peft import LoraConfig
@@ -30,6 +31,30 @@ from arclib.messagers import GPTTextMessageRepresenterV2
 from arclib.update_model import TTT
 from arclib.augmenters import *
 from inference.preprocess import get_preprocessed_tasks_single
+
+
+def download_arc_data(data_dir: str = "data"):
+    """Download ARC dataset if not already present."""
+    os.makedirs(data_dir, exist_ok=True)
+    
+    files = {
+        "arc-agi_training_challenges.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/training/challenges.json",
+        "arc-agi_training_solutions.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/training/solutions.json",
+        "arc-agi_evaluation_challenges.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/evaluation/challenges.json",
+        "arc-agi_evaluation_solutions.json": "https://raw.githubusercontent.com/fchollet/ARC-AGI/master/data/evaluation/solutions.json",
+    }
+    
+    for filename, url in files.items():
+        filepath = os.path.join(data_dir, filename)
+        if not os.path.exists(filepath):
+            print(f"Downloading {filename}...")
+            try:
+                urllib.request.urlretrieve(url, filepath)
+                print(f"✓ Downloaded {filename}")
+            except Exception as e:
+                print(f"✗ Failed to download {filename}: {e}")
+        else:
+            print(f"✓ {filename} already exists")
 
 
 def get_augmenters(
@@ -212,6 +237,11 @@ def main():
     
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Download ARC data if needed
+    print("\nChecking ARC dataset...")
+    data_dir = os.path.dirname(args.data_file) or "data"
+    download_arc_data(data_dir)
     
     # Load tasks
     print("\nLoading tasks...")
