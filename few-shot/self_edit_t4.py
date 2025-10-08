@@ -168,7 +168,8 @@ def get_test_time_train_data(task, augmenters, n: int = 1, permute_n: int = 1, s
     augmenters_with_identity = [IdentityAugmenter()] + augmenters
     
     for augmenter in augmenters_with_identity:
-        augmented_task = augmenter.apply_to_task(task)
+        # CRITICAL: Pass rng to augmenter (required for RandomTranslateXY and others)
+        augmented_task = augmenter.apply_to_task(task, rng=rng, to_input=True, to_output=True)
         
         if len(augmented_task.train_examples) > n:
             examples_to_use = augmented_task.train_examples[:-n]
