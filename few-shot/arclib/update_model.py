@@ -171,23 +171,46 @@ class TTT:
                 continue
 
             sample_input_ids = input_ids[i].tolist()
+            special_index = None
             
-            # Find all occurrences of the special sequence
-            # This is "<|start_header_id|>assistant<|end_header_id|>"
+            # Method 1: Llama-3 format - <|start_header_id|>assistant<|end_header_id|>
+            # Look for token sequence: 128007 followed by 271
             special_indices = []
             for j in range(len(sample_input_ids) - 1):
                 if sample_input_ids[j] == 128007 and sample_input_ids[j + 1] == 271:
-                    special_indices.append(j + 1)  # include the 271 token in the conditioning
+                    special_indices.append(j + 1)
             
-            # If we found multiple matches, use the second-to-last one
-            if len(special_indices) == 4:
+            if len(special_indices) >= 2:
+                # Use the second-to-last occurrence (final assistant response)
                 special_index = special_indices[-2]
-            else:
-                print(f"Warning: Special sequence not found in sample {i}, using fallback strategy")
-                special_index = int(len(sample_input_ids) * 0.8)
-                assert False
             
-            # Create labels: we want the model to predict tokens after the special sequence
+            # Method 2: Try decoding and searching for assistant marker in text
+            if special_index is None:
+                try:
+                    decoded_text = self.tokenizer.decode(sample_input_ids)
+                    
+                    # Mistral format: [/INST]
+                    if '[/INST]' in decoded_text:
+                        # Find position in text, then map back to tokens
+                        inst_pos = decoded_text.rfind('[/INST]')
+                        # Approximate token position (rough heuristic: 4 chars per token)
+                        special_index = min(len(sample_input_ids) - 1, 
+                                          int(inst_pos / 4))
+                    
+                    # Llama format (alternative): "assistant\n\n"
+                    elif 'assistant\n\n' in decoded_text:
+                        asst_pos = decoded_text.rfind('assistant\n\n')
+                        special_index = min(len(sample_input_ids) - 1,
+                                          int(asst_pos / 4))
+                except:
+                    pass
+            
+            # Fallback: Train on last 20% of tokens
+            if special_index is None:
+                print(f"Warning: No assistant marker found in sample {i}, training on last 20%")
+                special_index = int(len(sample_input_ids) * 0.8)
+            
+            # Create labels: predict tokens after the special sequence
             for j in range(special_index + 1):
                 labels[i, j] = -100
         
