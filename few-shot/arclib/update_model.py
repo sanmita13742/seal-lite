@@ -53,8 +53,9 @@ class TTT:
             
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
+            torch_dtype=torch.float16,
+            # Remove device_map="auto" - let Trainer handle device placement
+            # device_map="auto" causes meta tensor issues with HuggingFace Trainer
         )
 
         if state_dict_path is not None:
