@@ -1,0 +1,345 @@
+"""
+T4-Optimized Test-Time Training (TTT) for SEAL
+Implements complete LoRA-based TTT on T4 GPU with 16GB VRAM
+
+Features:
+- LoRA fine-tuning at test time
+- Memory-efficient training
+- Works on single T4 GPU
+- No vLLM dependency
+"""
+
+import os
+import json
+import torch
+import argparse
+from pathlib import Path
+from typing import List, Optional
+from tqdm import tqdm
+
+from transformers import AutoTokenizer
+from peft import LoraConfig
+
+from arclib.arc import read_tasks_from_single_file
+from arclib.representers import (
+    TextTaskRepresenter,
+    TextExampleRepresenter,
+    PythonListGridRepresenter,
+)
+from arclib.messagers import GPTTextMessageRepresenterV2
+from arclib.update_model import TTT
+from arclib.augmenters import *
+from inference.preprocess import get_preprocessed_tasks_single
+
+
+def get_augmenters(
+    include_basic: bool = True,
+    include_size: bool = True,
+    include_chain: bool = True,
+    include_repeat: bool = True
+) -> List:
+    """Get list of augmenters based on configuration."""
+    
+    basic_augmenters = (
+        [
+            Rotate(90), Rotate(270), Rotate(180),
+            Flip(0), Flip(1),
+            Reflect(0, reverse=True), Reflect(1, reverse=True),
+            Reflect(0, reverse=False), Reflect(1, reverse=False),
+            RandomTranslateXY(), Transpose(),
+        ]
+        if include_basic else []
+    )
+    
+    size_augmenters = (
+        [
+            IncreaseResolution(2),
+            IncreaseHeight(2),
+            IncreaseWidth(2),
+        ]
+        if include_size else []
+    )
+    
+    chain_augmenters = (
+        [
+            Chain([Rotate(90), IncreaseResolution(2)]),
+            Chain([Rotate(270), IncreaseResolution(2)]),
+            Chain([Rotate(180), IncreaseResolution(2)]),
+            Chain([Flip(0), IncreaseResolution(2)]),
+            Chain([Flip(1), IncreaseResolution(2)]),
+            Chain([Transpose(), IncreaseResolution(2)]),
+        ]
+        if include_chain else []
+    )
+    
+    repeat_augmenters = (
+        [Repeat(0, 2), Repeat(1, 2), Repeat(2, 2)]
+        if include_repeat else []
+    )
+    
+    return (
+        basic_augmenters +
+        size_augmenters +
+        chain_augmenters +
+        repeat_augmenters
+    )
+
+
+def process_task(
+    task,
+    augmenters,
+    formatter,
+    tokenizer,
+    leave_n: List[int] = [1, 2],
+    permute_n: int = 1,
+    Nmax: int = 250,
+    seed: int = 0
+):
+    """Process task to create training data."""
+    from arclib.arc import Task
+    from arclib.augmenters import IdentityAugmenter, PermuteExamples
+    
+    train_data = []
+    
+    for leave_out in leave_n:
+        for _ in range(permute_n):
+            # Get preprocessed tasks
+            tasks_list = get_preprocessed_tasks_single(
+                task=task,
+                augmenters=[IdentityAugmenter()] + augmenters,
+                task_processor=formatter.process,
+                leave_n=leave_out,
+                Nmax=Nmax,
+                seed=seed
+            )
+            
+            # Apply permutations
+            for augmented_task in tasks_list:
+                permuted_tasks = PermuteExamples().apply_to_task(augmented_task)
+                
+                for perm_task in permuted_tasks[:1]:  # Take first permutation
+                    # Format as text
+                    messages = formatter.process(perm_task)
+                    if messages:
+                        full_text = formatter.format_messages(messages)
+                        
+                        # Tokenize to check length
+                        tokens = tokenizer(full_text, return_tensors="pt")
+                        if tokens['input_ids'].shape[1] <= 8000:  # Max length check
+                            train_data.append({
+                                "full_text": full_text,
+                                "task_name": task.name
+                            })
+    
+    return train_data
+
+
+def main():
+    parser = argparse.ArgumentParser(description='T4-Optimized TTT for SEAL')
+    
+    # Data arguments
+    parser.add_argument(
+        '--data_file',
+        type=str,
+        default='data/arc-agi_training_challenges.json',
+        help='Path to ARC challenges file'
+    )
+    parser.add_argument(
+        '--solution_file',
+        type=str,
+        default='data/arc-agi_training_solutions.json',
+        help='Path to ARC solutions file'
+    )
+    parser.add_argument(
+        '--num_tasks',
+        type=int,
+        default=10,
+        help='Number of tasks to process'
+    )
+    
+    # Model arguments
+    parser.add_argument(
+        '--model_name',
+        type=str,
+        default='meta-llama/Llama-3.2-1B-Instruct',
+        help='Base model name'
+    )
+    parser.add_argument(
+        '--use_8bit',
+        action='store_true',
+        help='Use 8-bit quantization'
+    )
+    
+    # LoRA arguments
+    parser.add_argument('--lora_rank', type=int, default=128)
+    parser.add_argument('--lora_alpha', type=int, default=16)
+    parser.add_argument('--lora_dropout', type=float, default=0.0)
+    
+    # Training arguments
+    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--gradient_accumulation_steps', type=int, default=2)
+    parser.add_argument('--learning_rate', type=float, default=1e-4)
+    parser.add_argument('--num_train_epochs', type=int, default=3)
+    parser.add_argument('--lr_scheduler_type', type=str, default='cosine')
+    
+    # Augmentation arguments
+    parser.add_argument('--include_basic_aug', action='store_true', default=True)
+    parser.add_argument('--include_size_aug', action='store_true', default=True)
+    parser.add_argument('--include_chain_aug', action='store_true', default=True)
+    parser.add_argument('--include_repeat_aug', action='store_true', default=True)
+    
+    # Output arguments
+    parser.add_argument(
+        '--output_dir',
+        type=str,
+        default='loras_t4/ttt',
+        help='Output directory for LoRA adapters'
+    )
+    
+    args = parser.parse_args()
+    
+    print("=" * 80)
+    print("T4-Optimized Test-Time Training for SEAL")
+    print("=" * 80)
+    print(f"Model: {args.model_name}")
+    print(f"LoRA rank: {args.lora_rank}")
+    print(f"Batch size: {args.batch_size}")
+    print(f"Gradient accumulation: {args.gradient_accumulation_steps}")
+    print(f"Learning rate: {args.learning_rate}")
+    print(f"Epochs: {args.num_train_epochs}")
+    print(f"8-bit: {args.use_8bit}")
+    print("=" * 80)
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # Load tasks
+    print("\nLoading tasks...")
+    tasks = read_tasks_from_single_file(
+        challenge_file=args.data_file,
+        solution_file=args.solution_file
+    )
+    tasks = tasks[:args.num_tasks]
+    print(f"Loaded {len(tasks)} tasks")
+    
+    # Setup tokenizer
+    print("\nLoading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name)
+    
+    # Setup formatters
+    print("Setting up formatters...")
+    standard_formatter = TextTaskRepresenter(
+        example_representer=TextExampleRepresenter(
+            io_sep=" -> ",
+            input_header="",
+            output_header="",
+            output_footer="#",
+            grid_representer=PythonListGridRepresenter(),
+        )
+    )
+    representer = GPTTextMessageRepresenterV2(task_representer=standard_formatter)
+    
+    # Setup LoRA config
+    lora_config = LoraConfig(
+        r=args.lora_rank,
+        lora_alpha=args.lora_alpha,
+        lora_dropout=args.lora_dropout,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules=["q_proj", "v_proj", "gate_proj", "down_proj", "up_proj"]
+    )
+    
+    # Initialize TTT
+    print("\nInitializing TTT model...")
+    ttt = TTT(
+        model_name=args.model_name,
+        state_dict_path=None,
+        lora_config=lora_config
+    )
+    print("TTT model initialized")
+    
+    # Setup augmenters
+    augmenters = get_augmenters(
+        include_basic=args.include_basic_aug,
+        include_size=args.include_size_aug,
+        include_chain=args.include_chain_aug,
+        include_repeat=args.include_repeat_aug
+    )
+    print(f"Using {len(augmenters)} augmenters")
+    
+    # Process each task
+    results = []
+    print("\nProcessing tasks...")
+    
+    for i, task in enumerate(tqdm(tasks, desc="Tasks")):
+        print(f"\n--- Task {i+1}/{len(tasks)}: {task.name} ---")
+        
+        # Process task to create training data
+        print("Creating training data...")
+        train_data = process_task(
+            task=task,
+            augmenters=augmenters,
+            formatter=representer,
+            tokenizer=tokenizer,
+            leave_n=[1, 2],
+            permute_n=1,
+            Nmax=250,
+            seed=0
+        )
+        
+        if len(train_data) == 0:
+            print("No training data generated, skipping...")
+            continue
+        
+        print(f"Generated {len(train_data)} training examples")
+        
+        # Extract text
+        task_text_list = [data["full_text"] for data in train_data]
+        
+        # Train LoRA adapter
+        task_name_clean = task.name.split("-")[0] if "-" in task.name else task.name
+        output_path = os.path.join(args.output_dir, task_name_clean)
+        
+        print(f"Training LoRA adapter...")
+        print(f"Output: {output_path}")
+        
+        adapter_path = ttt.update_model(
+            task_text_list=task_text_list,
+            output_dir=output_path,
+            batch_size=args.batch_size,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            learning_rate=args.learning_rate,
+            num_train_epochs=args.num_train_epochs,
+            lr_scheduler_type=args.lr_scheduler_type,
+            loss_on_all_tokens=False
+        )
+        
+        results.append({
+            "task_name": task.name,
+            "adapter_path": adapter_path,
+            "num_training_examples": len(train_data)
+        })
+        
+        print(f"✓ LoRA adapter saved: {adapter_path}")
+        
+        # Clear CUDA cache
+        torch.cuda.empty_cache()
+    
+    # Save results summary
+    results_file = os.path.join(args.output_dir, "ttt_results.json")
+    with open(results_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    print("\n" + "=" * 80)
+    print(f"TTT Complete!")
+    print(f"Processed {len(results)} tasks")
+    print(f"Results saved to: {results_file}")
+    print("=" * 80)
+    
+    # Cleanup
+    del ttt
+    torch.cuda.empty_cache()
+
+
+if __name__ == "__main__":
+    main()
